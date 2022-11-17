@@ -1,0 +1,364 @@
+---
+title: "Survival Analysis of VA Lung Cancer Dataset"
+author: "Ali Saadat Varnosfaderanii"
+geometry: "left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm"
+fontsize: 12pt
+output: 
+  pdf_document:
+    extra_dependencies: ["flafter", "amsmath"]
+    
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(survival)
+library(survminer)
+library(GGally)
+library(papeR)
+library(Greg)
+library(pammtools)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+theme_set(theme_minimal() + theme(legend.position = "top"))
+```
+
+## Introduction
+
+The goal of the project is to perform survival analysis on the data from 137 advanced lung cancer patients. Patients were randomized according to one of two chemotherapeutic agents (standard vs test). Of particular interest is the possible differential effects of therapy on tumor cell type. Tumors are classified into one of four broad groups (squamous, small, adeno, and large). Covariates are: 
+
+1. Karnofsky performance which is an indicator of patients' general well-being; it ranges from 0-100 and larger numbers show better medical status. 
+
+2. Time from diagnosis to the start of study (in month). 
+
+3. Age in years. 
+
+4. Previous therapy.
+
+## Explanatory Data Analysis (EDA)
+
+Table 1 represents the summary statistics of continuous variables.
+
+```{r EDA_tables, size="tiny"}
+# Load data
+veteran <- survival::veteran
+veteran$trt <- factor(veteran$trt, labels = c("standard", "test"))
+veteran$prior <- factor(veteran$prior, labels = c("no", "yes"))
+
+# summary of variables
+vet_temp <- veteran #assign veteran to temporary object (we want status variable to remain numerical and not factor for the rest of the project, but transform it here in a factor for a cleaner summary)
+vet_temp$status <- as.factor(vet_temp$status) #transform status as factor 
+kable(summarize(vet_temp, type = "numeric"),
+      digits = 2,
+      caption = "Summary statistics for the numeric variables")
+# kable(summarize(vet_temp, type = "factor"),
+#       digits = 2,
+#       caption = "Summary statistics for the factor variables")
+rm(vet_temp)
+```
+
+<!-- We confirm the right skew that we noticed in the summary statistics. Moreover, there is not clear differentiating patterns between test or standard treatment groups (figure 1). -->
+
+```{r EDA_event_dist, fig.cap="Distribution of time-to-event by type of treatment",out.height="50%"}
+# ggplot(data = veteran, aes(x = time, fill = trt)) +
+#   geom_histogram()
+
+  # facet_grid(trt ~.)
+```
+
+All EDA plots (univariate and bivariate) is summarized in figure 1, which is colored based on treatment group. We can draw the following conclusions from figure 1:
+
+1. Two treatment groups have approximately equal number of subjects.
+
+2. There is no clear difference between the distribution of variables in case vs control.
+
+3. The *time* variable, which represents the event time, is right-skewed.
+
+4. There is a moderate correlation ($\approx 0.4$) between *karno* and *time* variables.
+
+5. 30% of the subjects had a prior treatment.
+
+6. Age ranges from 34 to 81 years old.
+
+
+```{r EDA_pair_plot, fig.cap="Pairs plot for all the variables", fig.width=7, fig.asp=0.6}
+p <- veteran[, c("karno", "diagtime", "age", "time", "celltype", "prior")] %>% 
+  ggpairs(mapping = aes(color=veteran$trt, alpha = 0.5),
+          upper = list(continuous = wrap("cor", size = 2)),
+          columnLabels = c( "karno", "diag", "age", "time", "cell", "prior")) +
+      theme(axis.text.x = element_text(color = "grey20", size = 6, angle = 90, hjust = .5, vjust = .5, face = "plain"),
+            axis.text.y = element_blank())
+
+for(i in 1:p$nrow) {
+  for(j in 1:p$ncol){
+    p[i,j] <- p[i,j] + 
+      scale_fill_brewer(palette = "Dark2")+
+      scale_color_brewer(palette = "Dark2")
+  }
+}
+
+p
+```
+
+## Model Fitting: Kaplan-Meier (KM) Estimator and Log-rank Test
+
+**Kaplan-Meier (KM) Estimator**, also known as the product limit estimator, is a non-parametric method used to estimate the survival function. It is defined as the probability of surviving in a given length of time while considering time in many small intervals. KM estimator works as follow:
+
+1. compute the probabilities of occurrence of event at a certain point of time
+
+2. multiply this probability by all the probabilities in the earlier intervals
+
+Mathematically, we can write KM estimator as $$\hat{S}(t) = \prod\limits_{j:t(j) \le t} (1-\frac{d_j}{r_j})$$ where $r_j$ is the number of individuals at risk just before t(j) (including censored individuals at t(j)), and $d_j$ is the number of individuals experiencing the event at time t(j).
+
+**Logrank test** compares survival curves (estimated with KM) of the two groups. It computes expected number of death for each unique death time in the data, assuming that the chance of dying for subjects at risk is the same for each group. The test compares the observed number of deaths in each group to the expected number using $\chi^2$ test with the statistic: ${\chi}^2=\sum_{k=1}^{n} \frac{(O_k - E_k)^2}{E_k}$. The null hypothesis is that there is no difference between the groups in the probability of an event at any time point; in other words $H_{NULL}: S_{control}(t) = S_{case}(t)$ and $H_{ALT}: S_{control}(t) \ne S_{case}(t)$
+
+<!-- At first, we estimate the survival function of all patients using KM estimator (figure 2 left). The dashed line shows the median of survival which is 80 days. -->
+
+<!-- Next, we investigate how age could be involved in survival. Since we can stratify based on categorical variables (not continuous variables), we separate the patients into groups with $age >= 60$ and $age < 60$. The result is plotted in figure 2 right. $Pvalue = 0.089$ ($Chisq = 2.9$ on 1 degrees of freedom) in the left corner is the outcome of log-rank test, with the null hypothesis that there is no difference between the groups in the probability of an event at any time point. If we consider $\alpha = 0.05$, then we cannot reject the null hypothesis; although it seems that there is a trend toward longer survival of patients with $age < 60$. -->
+
+```{r KM_fit_1_and_age, fig.show="hold", out.width="50%", fig.cap=c("left: Overall survival without stratification, right: Survival stratified by age"), out.height="50%"}
+# 
+# km_fit <- survfit(Surv(time, status) ~ 1, data=veteran)
+# 
+# ggsurvplot(km_fit,
+#           pval = FALSE, conf.int = TRUE,
+#           risk.table = FALSE, # Add risk table
+#           surv.median.line = "hv", # Specify median survival
+#           ggtheme = theme_classic2(base_size=6),
+#           fontsize = 3,
+#           xlab = "Time in days",
+#           color = "#1B9E77",
+#           ncensor.plot = FALSE,
+#           censor.shape="|",
+#           censor.size = 5)
+# 
+# # ~ age
+# vet_age <- mutate(veteran, age_fct = ifelse((age < 60), "below60", "over60"),
+#               age_fct = factor(age_fct))
+# km_fit_age <- survfit(Surv(time, status) ~ age_fct, data=vet_age)
+# ggsurvplot(km_fit_age,
+#           pval = TRUE, conf.int = FALSE,
+#           risk.table = FALSE, # Add risk table
+#           surv.median.line = "none", # Specify median survival
+#           ggtheme = theme_classic2(base_size=6),
+#           fontsize = 3,
+#           pval.size = 3,
+#           pval.coord = c(0,0.1),
+#           xlab = "Time in days",
+#           legend.labs = c("Age < 60", "Age >= 60"),
+#           palette = c("#1B9E77", "#E6AB02"),
+#           ncensor.plot = FALSE,
+#           censor.shape="|",
+#           censor.size = 5)
+```
+
+To explore the impact of treatment on survival, we estimate the the survival probability of patients stratified by their treatments using KM estimator(figure 2 left). To compare the survival curves, logrank test is performed. $Pvalue = 0.93$ ($Chisq = 0$ on 1 degrees of freedom) in the left corner is very high, and we cannot reject the null hypothesis. Thus, we cannot conclude that treatment has a significant effect on survival. 
+
+Another variable to explore is the cell type. Figure 2 right shows how survival probability can differ based on the cell type. We observe that *squamous* and *large* cell types have a higher survival probability compared to *small* and *adenocarcioma* cells. 
+
+```{r KM_fit_trt_and_cell, fig.cap="left: Survival stratified by treatment, right: Survival stratified by cell-type", fig.show="hold", out.width="50%", out.height="50%"}
+# ~ treatment
+km_fit_trt <- survfit(Surv(time, status) ~ trt, data=veteran)
+ggsurvplot(km_fit_trt,
+          pval = TRUE, conf.int = FALSE,
+          risk.table = FALSE, # Add risk table
+          surv.median.line = "none", # Specify median survival
+          ggtheme = theme_classic2(base_size=6),
+          fontsize = 3,
+          pval.size = 3,
+          pval.coord = c(0,0.1),
+          palette = c("#1B9E77", "#E6AB02"),
+          xlab = "Time in days",
+          ncensor.plot = FALSE,
+          censor.shape="|",
+          censor.size = 5)
+
+# ~ cell type
+km_fit_cell <- survfit(Surv(time, status) ~ celltype, data=veteran)
+ggsurvplot(km_fit_cell,
+          pval = FALSE, conf.int = FALSE,
+          risk.table = FALSE, # Add risk table
+          surv.median.line = "non", # Specify median survival
+          ggtheme = theme_classic2(base_size=5),
+          fontsize = 3,
+          palette = c("#1B9E77", "#E6AB02", "#A6761D", "#7570B3"),
+          xlab = "Time in days",
+          ncensor.plot = FALSE,
+          censor.shape="|",
+          censor.size = 5,
+          legend.labs = c("Squamous","Small Cell","Adenocarcioma","Large")) # Change the Strata Legend
+```
+
+We perform pairwise comparison between cell types; after Benjamini-Hochberg adjustment, there are significance differences between *small-large*, *small-squamous*, *adeno-large*, and *adeno-squamous* (table 2).
+
+```{r logrank_celltype, size="small"}
+logrank_cell <-  pairwise_survdiff(Surv(time, status) ~ celltype, data = veteran)
+opts <- options(knitr.kable.NA = "-")
+kable(logrank_cell$p.value,
+      digits=3,
+      caption = "Pairwise log-rank test between celltypes; each value represents adjusted pvalue")
+```
+
+## Model Fitting: Cox Propotional Hazard (Cox-PH) 
+
+Cox-ph model is fitted using maximum partial likelihood. To find the best model, we to perform an exhaustive search (without interaction) so we can select a simple and informative model by choosing a model with minimum AIC. To begin with, we confirm that there is no multicollinearity between variables ($VIF<2.2$ for all the variable). Then, we fit a cox-ph model with all the variables included. We can see that PH assumption is violated by *celltype* and *karno* variables (table 3):
+
+```{r PH-violation, size="small"}
+cox.zph(coxph(Surv(time, status) ~ celltype + trt  + karno + prior + age + diagtime, data=veteran)) %>% 
+  extract2("table") %>% 
+  txtRound(digits = 2) %>% 
+  knitr::kable(align = "r", caption="Schoenfeld’s test for model with all variables")
+```
+
+To solve the PH-violation:
+
+1. we stratify the baseline hazard according to the *celltype* (figure 3).
+
+2. we split the time into smaller intervals (split points are 90 and 180 days) and calculate *karno* coefficient in each interval.
+
+With these actions, Schoenfeld’s global test is no longer significant (table 4):
+
+```{r PH-solving, size="small"}
+# split time into smaller time intervals so karno variable follows the PH assumption 
+vet_split <- survSplit(Surv(time, status) ~ ., data=veteran, cut=c(90, 180), episode = "tgroup", id="id")
+cph_split <- coxph(Surv(tstart, time, status) ~ strata(celltype) + trt  + karno:strata(tgroup)  + prior + age + diagtime, data=vet_split)
+
+cox.zph(cph_split) %>% 
+  extract2("table") %>% 
+  txtRound(digits = 2) %>% 
+  knitr::kable(align = "r", caption="Schoenfeld’s test after solving PH violations")
+```
+
+```{r cox_fitting, fig.cap="Baseline hazard stratification by cell-types",fig.height=3, fig.width=5}
+veteran <- survival::veteran %>%
+  mutate(
+    trt   = 1*(trt == 2),
+    prior = 1*(prior==10))
+# stratify the baseline hazard according to the cell type
+cph <- coxph(Surv(time, status) ~ strata(celltype), data=veteran)
+base <- basehaz(cph)
+# plot  baseline hazards for cell types 
+baseline_gg <- ggplot(base, aes(x=time)) +
+  geom_step(aes(y=hazard, group=strata)) +
+    ylab("Baseline hazard") + xlab("t")
+baseline_gg + aes(col=strata)
+
+```
+
+
+
+After handling the PH-violation, we calculate AIC (using *extractAIC* function) for all the possible models (combination of variables without interaction). We observe that the lowest AIC (=628.4) belongs to a cox-model with *celltype* and *karno* as variables. The maximum AIC (=1015.9) belongs to the model with *treatment*, *prior_treatment*, *age*, and *diagnos_time*. Therefore, we conclude that only *celltype* and *karno* are the important variables.
+
+```{r exhaustive_selection}
+predictors <- c("strata(celltype)", "trt", "karno:strata(tgroup)", "prior", "age", "diagtime")
+
+combination_of_variables_list <- lapply(seq_along((predictors)), function(n) {
+    right.hand.side <- apply(X = combn(predictors, n), MARGIN = 2, paste, collapse = " + ")
+})
+
+combination_of_variables <- unlist(combination_of_variables_list)
+
+results <- data.frame(num_predictor=integer(),
+                      AIC=double(),
+                      model=character(),
+                      stringsAsFactors = FALSE)
+
+for (i in 1:length(combination_of_variables)){
+
+  if (str_detect(combination_of_variables[i], "karno"))
+      {
+    model_formula <- as.formula(str_c("Surv(tstart, time, status) ~", combination_of_variables[i]))
+    fit <- coxph(model_formula, data=vet_split)
+  }
+  else
+    {
+    model_formula <- as.formula(str_c("Surv(time, status) ~", combination_of_variables[i]))
+    fit <- coxph(model_formula, data=veteran)
+  }
+  result_AIC <- extractAIC(fit)
+  results[i, ] <- c(result_AIC[1], result_AIC[2], str_c("cox ~", combination_of_variables[i]))
+}
+```
+
+### Cox-PH Final Model
+
+The final model is $\mathbf{ \hat{h}(t) = h_0(t, celltype)exp(\beta_{karno}(t)*x_{karno})}$ where:
+
+* $h_o(t, celltype)$ being the baseline hazard specific to a cell type from figure 3. We observe that for *squamous* and *large* cell types, the baseline hazard increases slowly, but for *small* and *adeno* cell types it increases sharply.
+
+* $\beta_{karno}(t)$ depends on the time because we split the time into three intervals to solve PH-violations:
+
+```{r final_model}
+cph_final <- coxph(Surv(tstart, time, status) ~ strata(celltype) + karno:strata(tgroup), data=vet_split)
+```
+
+```{=latex}
+
+\[
+    \beta_{karno}(t)= 
+\begin{cases}
+    -0.05,         & t \in [0, 90)\\
+    0.01,              & t \in [90, 180)\\
+    -0.02,              & t \geq 180
+\end{cases}
+\]
+```
+
+To get a deeper insight into $\beta_{karno}(t)$, we plot the hazard-ratio ($HR = exp(\beta)$)  in figure 4. 
+
+```{r HR, fig.cap="Hazard ratio for karno variable with 95% CI", fig.width=3, fig.height=1.5}
+hr_df <- data.frame(name = c("HR t<90 days", "HR 90<t<180 days", "HR t>180 days"), 
+                    beta = coef(cph_final),
+                    se = c(0.00646, 0.01489, 0.01942),
+                    p = c(4.96e-13, 0.481, 0.393))
+ggforestplot::forestplot(
+  df = hr_df,
+  name = name,
+  estimate = beta,
+  se = se,
+  pvalue = p,
+  psignif = 0.05,
+  logodds = TRUE
+) + theme(axis.title.x=element_blank(), axis.text.x = element_text(size=6))
+```
+
+We observe that *karno* score in the first interval ($t < 90$ days) is significantly associated with decreased risk of death. But we don not see such an association for interval 2 and 3 ($t >= 90$ days). This suggests that the impact of *karno* is limited to the first three months. That being said, it must be noted that in acute illnesses, any measure that is over six months is usually no longer relevant. Furthermore, many of the patients with low *karno* score have been lost; at the beginning, 28% of the patients have $karno < 40$, but after six month, only 4% of them remained in the study. 
+
+
+
+## Model Assessment 
+
+There are three important assumptions for cox PH that must be assessed:
+
+1. **Proportional hazard assumption**, which means that the relative hazard remains constant over time with different predictors. We check this assumption using **Schoenfeld** residuals. Schenofel residual is the difference between the observed covariate and the expected. In principle, Schoenfeld residuals are independent of time, so a non-random pattern is indication of PH-violation. We do not observe such a pattern in figure 5 top-left, so PH assumption is valid. (Note: PH assumption was violated in our first model which included all the variables, and we solved this issue  by stratifying the baseline hazard according to the *celltype* and splitting the time into smaller intervals. There are other methods to solve the violation of PH-assumption. For example, adding time-interaction terms might help to handle the PH-violation; however it is often not straightforward to interpret the interaction terms. Another method is to fit a time-varying coefficient model which is more complex and beyond the scope of this project)
+
+2. **There is no influential observation or outlier.** To detect outliers, **Deviance** residuals is utilized. The Deviance residual is the measure of deviance contributed from each observation. The idea behind it is to examine the difference between the log-likelihood for subject i under a given model and the maximum possible log-likelihood for that subject. We visualize deviance residuals (figure 5 top-right). It is clear that deviance residuals are fairly symmetric around zero, meaning that there is no outlier.
+
+3. **All continuous covariates in the model must have a linear form.** To validate this assumption, we use **Martingale** residuals, which are the discrepancy between the observed value of a subject’s failure indicator and its expected value integrated over the time for which that patient was at risk. Martingle residual ranges from $-\infty$ to 1; negative values are assigned to subjects that lived longer than expected and positive values belong to subjects that died sooner than expected by model. We plot the Martingale residuals against continuous covariates (here *karno*) to detect nonlinearity. For a given continuous covariate, patterns in the plot may suggest that the variable is not properly fit. In figure 5 bottom-left no pattern is observed, so this assumption is valid.
+
+```{r model_assessment, fig.cap="Residuals (top-left: Schenofel, top-right: Deviance, bottom-left: Martingale) ", fig.show="hold", out.width="45%"}
+ggcoxzph(cox.zph(cph_final)) + ylab(expression(beta(t) ~ "for karno variable"))
+
+ggcoxdiagnostics(cph_final, type = "deviance",
+                 linear.predictions = FALSE, ggtheme = theme_bw())
+
+scatter.smooth(vet_split$karno, residuals(cph_final, type="martingale"), xlab="karno", ylab="Martingale residual", pch=19, col="red", cex=0.5)
+```
+
+\
+
+
+## Conclusion
+
+In this project, the survival analysis of VA lung cancer dataset was performed. In summary:
+
+* the survival probability was calculated using Kaplan-Meier estimator
+
+* the survival curves were compared using log-rank test
+
+* an exhaustive search was performed to find the best cox-ph model
+
+* cox-ph model was fitted using maximum partial likelihood
+
+* the cox-ph assumptions was verified by plotting various residuals
+
+The results suggest that treatment with new chemotherapeutic agent has no significant effect on the survival probability of patients. One of the most critical variables that impacts the patients outcome is tumor cell type, as we observed that survival curves differs significantly based on cell type. It was shown that patients with *squamous* and *large* cell types have a higher survival probability compared to patients with *small* and *adenocarcioma* cells. Furthermore, Karnofsky performance is strongly associated with the survival outcome, but its effect is limited to the first three months, so this variable should not be used as a predictor after three months of diagnosis. From a transnational perspective, outcomes of this project could include novel disease bio-markers, better prediction models, or innovative targets for diagnostic or therapeutic development; however, the sample size is small and further investigation is required to make a conclusive statement.

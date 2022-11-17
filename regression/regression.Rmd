@@ -1,0 +1,237 @@
+---
+title: "Regression alanysis of airline costs"
+author: "Jeremy Baffou, Valeriia Timonina, Ali Saadat"
+date: "08/04/2022"
+geometry: "left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm"
+fontsize: 12pt
+output: 
+  pdf_document:
+    extra_dependencies: ["flafter"]
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(psych)
+library(GGally)
+knitr::opts_chunk$set(echo = FALSE)
+theme_set(theme_minimal() + theme(legend.position = "top"))
+```
+
+### Introduction
+
+The purpose of this analysis is to find variables which affect airline costs (Operating Costs per revenue ton-mile). The effect of seven factors is studied: Length of flight (miles), Speed of Plane (miles per hour), Daily Flight Time per plane (hours), Population served (1000s), Total Operating Cost (cents per revenue ton-mile), Revenue Tons per Aircraft mile, Ton-Mile load factor (proportion), Available Capacity (Tons per mile), Total Assets (\$100,000s), Investments and Special Funds (\$100,000s), and Adjusted Assets  (\$100,000s). Regression based on natural logarithms of all factors, except load factor, is performed. 
+
+### Explanatory Data Analysis (EDA)
+```{r}
+air <- read.delim("air.txt", header=FALSE, sep="")
+names(air) <- c("Airline", "LengthOfFlight", "SpeedOfPlane", "DailyFlightTime", "PopulationServed", "TotalOperatingCost", "RevenueTons", "TonMileLoadFactor", "AvailableCapacity", "TotalAssets", "Investments", "NetAssets")
+```
+
+First, we transform the following variables into log-scale because they have a wide range of variability: *LengthOfFlight, SpeedOfPlane, DailyFlightTime, PopulationServed, AvailableCapacity , TotalAssets, Investments, NetAssets*. We did not change Ton-Mile load factor into log scale because it is between 0 and 1, and taking a log would change it to big negative values. Then we summarize each column as a univariate. The distribution of each univariate is as follow:
+
+```{r log_scale}
+log_col = c("LengthOfFlight", "SpeedOfPlane", "DailyFlightTime", "PopulationServed", "AvailableCapacity", "TotalAssets", "Investments", "NetAssets")
+
+air[log_col] <- lapply(air[log_col], log)
+```
+
+```{r boxplot}
+vars <- colnames(air)[2:12]
+
+air_summary <-  data.frame(
+  measure = vars,
+  minimum = apply(air[ ,vars], 2, min),
+  Q1 = apply(air[ ,vars], 2, function(x) quantile(x, 0.25)), 
+  median = apply(air[ ,vars], 2, median),
+  mean = apply(air[ ,vars], 2, mean),
+  Q3 = apply(air[ ,vars], 2, function(x) quantile(x, 0.75)),
+  maximum = apply(air[ ,vars], 2, max),
+  row.names = NULL
+)
+
+kable(
+  air_summary,
+  col.names = c("Measure", "*Min*", "*Q1*", "*Median*", "*Mean*", "*Q3*", "*Max*"),
+  digits = 2,
+  caption = "Summary Statistics for the Air Dataset", 
+  ) 
+```
+
+It could be more informative to look at the boxplot of each univariate (Figure 1).
+
+```{r, fig.cap="Boxplot of univariates (outliers are removed)", fig.height=5, fig.width=5}
+#Function to turn outliers into NA
+filter_lims <- function(x){
+  l <- boxplot.stats(x)$stats[1]
+  u <- boxplot.stats(x)$stats[5]
+  for (i in 1:length(x)){
+    x[i] <- ifelse(x[i]>l & x[i]<u, x[i], NA)
+  }
+  return(x)
+}
+
+air %>%
+  as_tibble() %>% 
+  select_if(is.numeric) %>%
+  gather(key = "variable", value = "value") %>% 
+  group_by(variable) %>%  
+  mutate(value2 = filter_lims(value)) %>%  # new variable (value2) so as not to displace first one)
+  ggplot() +
+  geom_boxplot(aes(y=value2), na.rm = TRUE, coef = 5) +
+  facet_wrap(~variable, scales = 'free') +
+  theme(text=element_text(size=8),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank())
+```
+
+In order to compare the distribution of univariates, we look at their QQ-plot (Figure 2).
+
+```{r, fig.cap="QQ-plot for each univariates", fig.height=7, fig.width=7}
+air %>%
+  as_tibble() %>% 
+  select(-Airline) %>%
+  gather(key = "variable", value = "value") %>% 
+  ggplot(aes(sample=value)) +
+  facet_wrap(~variable, scales = 'free') +
+  stat_qq() +
+  stat_qq_line() +
+  theme(text=element_text(size=8),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank())
+```
+
+Next, we explore the pairs of the variables (i.e. bivariates) which can provide new information. Therefore, we draw the pairwise scatterplot for bivariates, and calculate the pairwise correlation coefficient (Figure 3).
+
+```{r, fig.cap="Bivariate plots; upper pannel shows the pairwise correlation, lower pannel shows that pairwise scatterplot, and diagonal pannel illustrates the univariate distribution", fig.height=7, fig.width=7}
+short_names <- c("FlightLength", "PlaneSpeed", "FlightTime", "Pop.Served", "TotalCost", "Revenue", "LoadFactor", "Capacity", "TotalAssets", "Investments", "NetAssets")
+
+#Using ggpairs from GGaly package
+ggpairs(air[, vars], upper = list(continuous = wrap("cor", size = 2)), 
+        lower = list(continuous = wrap("points", size=0.1)),
+        columnLabels = short_names) +
+  theme(text=element_text(size=5.5),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank(), 
+      axis.ticks.x = element_blank(), 
+      axis.ticks.y = element_blank(), 
+      axis.text.y = element_blank(),
+      axis.text.x = element_blank())
+```
+
+### Model Fitting 
+
+To perform our regression we will be using a linear model based initially on seven variables: *LengthOfFlight,SpeedOfPlane,DailyFlightTime,PopulationServed,AvailableCapacity,NetAssets* and *TonMileLoadFactor*. We decided to keep only the raw variables and to not consider the possible interactions terms because: 
+
+1. Our preliminary exploration showed that interaction terms only make the model more complex without any significant 
+
+2. We want to keep the model as simple as possible following the Occam razor principle. 
+
+Thus, our initial model is as follow:
+
+```{r initial_model, echo=FALSE}
+initial_model <- lm(log(TotalOperatingCost/RevenueTons) ~ LengthOfFlight+SpeedOfPlane+DailyFlightTime+PopulationServed+AvailableCapacity+NetAssets+TonMileLoadFactor,data=air)
+equatiomatic::extract_eq(initial_model, wrap = TRUE, terms_per_line = 2, intercept = "beta", operator_location="end", font_size = "small", label=NULL)
+```
+
+### Model Selection
+
+1. **Multicollinearity**
+
+As the first step of model selection. we look for multicollinearity. The use of this method makes sense in the context of our data because several variables are clearly correlated (high correlation between some variables in Figure 3). To check for possible multicollinearity we used the Variance Inflation Factor (VIF) metric. The higher the VIF is the higher the collinearity. A commonly used threshold is 10, i.e. that any variable with a VIF greater than 10 should be removed from the model. We thus first compute the VIF for each variable in our initial model:
+
+
+```{r vif1, echo=FALSE, size="small"}
+df <- data.frame(car::vif(initial_model))
+colnames(df) <- "VIF"
+kable(
+  df,
+  col.names = colnames(df),
+  digits = 2,
+  caption = "Initial model VIF metrics", 
+  ) 
+```
+
+We remove *NetAssets* since it has the largest VIF above threshold. We calculate VIF for the remaining variables:
+
+```{r vif2, echo=FALSE}
+air_col <-  lm(log(TotalOperatingCost/RevenueTons) ~ SpeedOfPlane+DailyFlightTime+PopulationServed+AvailableCapacity+TonMileLoadFactor+LengthOfFlight, data=air)
+df <- data.frame(car::vif(air_col))
+colnames(df) <- "VIF"
+kable(
+  df,
+  col.names = colnames(df),
+  digits = 2,
+  caption = "VIF metrics after removing NetAssets", 
+  ) 
+```
+
+We remove *LengthOfFlight* because it has a VIF >10. After calculating VIF for the 5 remaining variables, we observe that all of them have small VIFs.
+
+```{r vif_final_model, echo=FALSE}
+air_col <-  lm(log(TotalOperatingCost/RevenueTons) ~ SpeedOfPlane+DailyFlightTime+PopulationServed+AvailableCapacity+TonMileLoadFactor, data=air)
+df <- data.frame(car::vif(air_col))
+colnames(df) <- "VIF"
+kable(
+  df,
+  col.names = colnames(df),
+  digits = 2,
+  caption = "VIF metrics after removing LengthOfFlight", 
+  ) 
+```
+
+Thus at this step we have a model with five variables: *SpeedOfPlane, DailyFlightTime, PopulationServed, AvailableCapacity,* and *TonMileLoadFactor*.
+
+2. **Goodness of Fit**
+
+Here we use Akaike Information Criterion (AIC) to check the fittness of our model considering its complexity. We use stepAIC (backward selection) which starts from an initial complex model and try to reduce its complexity by removing at each step the variable that contributes the less to the reduction in AIC. Based on the stepAIC results (Table 5), *SpeedOfPlane* and *PopulationServed*  have a negligible contribution to the the reduction of AIC and their statistical significance were low (pvalue > 0.05). We thus stop with a model with three parameters and no interaction term: *DailyFlightTime, AvailableCapacity, TonMileLoadFactor*.
+
+```{r StepAIC1, echo=FALSE}
+air_aic <- MASS::stepAIC(air_col, scope = list(upper = ~SpeedOfPlane+DailyFlightTime+PopulationServed+AvailableCapacity+TonMileLoadFactor, lower=~1), trace = F, direction = "backward")
+air_aic_df <- MASS::dropterm(air_aic, test = "F") %>% 
+  mutate(`Sum of Sq`=round(`Sum of Sq`, 2),
+         `F Value`=round(`F Value`, 2),
+         `Pr(F)`=round(`Pr(F)`, 2))
+air_aic_df$Df[1] <- ""
+air_aic_df$`Sum of Sq`[1] <- ""
+air_aic_df$`F Value`[1] <- ""
+air_aic_df$`Pr(F)`[1] <- ""
+rownames(air_aic_df)[1] <- ""
+
+kable(
+  air_aic_df,
+  col.names = colnames(air_aic_df),
+  digits = 2,
+  caption = "Step AIC output", 
+  ) 
+air_aic_speed_pop <-  lm(log(TotalOperatingCost/RevenueTons) ~ DailyFlightTime+AvailableCapacity+TonMileLoadFactor, data=air)
+# MASS::dropterm(air_aic, test = "F")
+# summary(air_aic)
+# air_aic_speed <- lm(log(TotalOperatingCost/RevenueTons) ~ DailyFlightTime+PopulationServed+AvailableCapacity+TonMileLoadFactor, data=air)
+# MASS::dropterm(air_aic_speed, test = "F")
+# summary(air_aic_speed)
+# air_aic_speed_pop <- lm(log(TotalOperatingCost/RevenueTons) ~ DailyFlightTime+AvailableCapacity+TonMileLoadFactor, data=air)
+# MASS::dropterm(air_aic_speed_pop, test = "F")
+# summary(air_aic_speed_pop)
+```
+
+### Model Assessment 
+
+Before assessing the model we will recall the different assumptions that we made about the model and the data which are Normal Theory Assumptions (NTA). The NTA suppose that all errors are independently normally distributed with mean $0$ and common variance $\sigma$. As the variance is fixed, NTA also implies homoscedicity of the residuals. To assess if our assumptions were right and thus if our model is correct we will proceed to a graphical inspection of our residuals.
+
+```{r model_selection, echo=FALSE, fig.height=4, fig.width=7, fig.cap="Model assessment"}
+layout(matrix(1:6,ncol=3))
+plot(air_aic_speed_pop, which=c(1,2,3,4,5,6))
+```
+
+The normality and homoscedasticity assumptions seem to hold as the QQ-plot (Figure 4) lies approximately on $y=x$ and the spread of the errors does not seem to vary as we move among the fitted values. We can also remark that some points have a high Cooks distance (6,30). Thus that they are data points with high leverage (such a point will have a stronger effect on the model than the rest of the points, inducing the risk of over fitting). When we look at these data points, we can see that they are outliers in the predictive variable. On such a small dataset and without field expertise we cannot remove these outliers but they may affect the model fitting if they are artifacts.
+
+### Final Model
+
+```{r final_model, echo=FALSE}
+equatiomatic::extract_eq(air_aic_speed_pop, use_coefs = TRUE, wrap = TRUE, terms_per_line = 2, font_size = "small")
+```
+
+### Conclusion
+
+Linear regression was performed to investigate which factors affect airline costs. We can see that all coefficients are negative, thus an increase in any of them would reduce the ratio. Which is a wanted thing for the airline as they wish to have the smallest operating cost per unit of revenue ton-mile. The exact amplitude of the influence is not intuitive due to the log scale on the parameters.
